@@ -2710,6 +2710,14 @@ bool SPIRVInstructionSelector::selectConst(Register ResVReg,
     MachineBasicBlock &DepMBB = I.getMF()->front();
     MachineIRBuilder MIRBuilder(DepMBB, DepMBB.getFirstNonPHI());
     Reg = GR.getOrCreateConstNullPtr(MIRBuilder, ResType);
+  } else if (TpOpcode == SPIRV::OpTypeBool) {
+    return BuildMI(I.getMF()->front(), I, I.getDebugLoc(),
+                   TII.get(I.getOperand(1).getCImm()->isZero()
+                               ? SPIRV::OpConstantFalse
+                               : SPIRV::OpConstantTrue))
+        .addDef(ResVReg)
+        .addUse(GR.getSPIRVTypeID(ResType))
+        .constrainAllUses(TII, TRI, RBI);
   } else if (Opcode == TargetOpcode::G_FCONSTANT) {
     Reg = GR.getOrCreateConstFP(I.getOperand(1).getFPImm()->getValue(), I,
                                 ResType, TII, STI.isOpenCLEnv());
@@ -3704,7 +3712,13 @@ bool SPIRVInstructionSelector::selectFrameIndex(Register ResVReg,
                  .addImm(static_cast<uint32_t>(SPIRV::StorageClass::Function))
                  .constrainAllUses(TII, TRI, RBI);
   if (!STI.isVulkanEnv()) {
-    unsigned Alignment = I.getOperand(2).getImm();
+    unsigned Alignment;
+    if(I.getOpcode() == TargetOpcode::G_FRAME_INDEX) {
+      Alignment = I.getOperand(1).getImm();
+    } else {
+      Alignment = I.getOperand(2).getImm();
+    }
+    
     buildOpDecorate(ResVReg, *It, TII, SPIRV::Decoration::Alignment,
                     {Alignment});
   }

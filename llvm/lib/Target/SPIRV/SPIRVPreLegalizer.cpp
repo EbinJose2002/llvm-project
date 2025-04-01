@@ -294,9 +294,9 @@ static void insertBitcasts(MachineFunction &MF, SPIRVGlobalRegistry *GR,
 //
 // Set SPIRVType for GV, propagate it from GV to other instructions,
 // also set register classes.
-static SPIRVType *propagateSPIRVType(MachineInstr *MI, SPIRVGlobalRegistry *GR,
-                                     MachineRegisterInfo &MRI,
-                                     MachineIRBuilder &MIB) {
+namespace llvm {
+SPIRVType *propagateSPIRVType(MachineInstr *MI, SPIRVGlobalRegistry *GR,
+                              MachineRegisterInfo &MRI, MachineIRBuilder &MIB) {
   SPIRVType *SpvType = nullptr;
   assert(MI && "Machine instr is expected");
   if (MI->getOperand(0).isReg()) {
@@ -304,7 +304,13 @@ static SPIRVType *propagateSPIRVType(MachineInstr *MI, SPIRVGlobalRegistry *GR,
     SpvType = GR->getSPIRVTypeForVReg(Reg);
     if (!SpvType) {
       switch (MI->getOpcode()) {
-      case TargetOpcode::G_FCONSTANT:
+      case TargetOpcode::G_FCONSTANT: {
+        MIB.setInsertPt(*MI->getParent(), MI);
+        Type *Ty = MI->getOperand(1).getFPImm()->getType();
+        SpvType = GR->getOrCreateSPIRVType(
+            Ty, MIB, SPIRV::AccessQualifier::ReadWrite, true);
+        break;
+      }
       case TargetOpcode::G_CONSTANT: {
         MIB.setInsertPt(*MI->getParent(), MI);
         Type *Ty = MI->getOperand(1).getCImm()->getType();
@@ -381,6 +387,7 @@ static SPIRVType *propagateSPIRVType(MachineInstr *MI, SPIRVGlobalRegistry *GR,
   }
   return SpvType;
 }
+} // namespace llvm
 
 // To support current approach and limitations wrt. bit width here we widen a
 // scalar register with a bit width greater than 1 to valid sizes and cap it to

@@ -19,6 +19,7 @@
 #include "SPIRVUtils.h"
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
+#include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachinePostDominators.h"
 #include "llvm/IR/Attributes.h"
 #include "llvm/IR/Constants.h"
@@ -49,6 +50,9 @@ extern void insertAssignInstr(Register Reg, Type *Ty, SPIRVType *SpirvTy,
 extern void processInstr(MachineInstr &MI, MachineIRBuilder &MIB,
                          MachineRegisterInfo &MRI, SPIRVGlobalRegistry *GR,
                          SPIRVType *KnownResType);
+extern SPIRVType *propagateSPIRVType(MachineInstr *MI, SPIRVGlobalRegistry *GR,
+                                     MachineRegisterInfo &MRI,
+                                     MachineIRBuilder &MIB);
 } // namespace llvm
 
 static bool mayBeInserted(unsigned Opcode) {
@@ -67,13 +71,65 @@ static bool mayBeInserted(unsigned Opcode) {
   }
 }
 
+static bool canPropagate(unsigned Opcode) {
+  switch (Opcode) {
+  case TargetOpcode::G_FCONSTANT:
+  case TargetOpcode::G_CONSTANT:
+  case TargetOpcode::G_TRUNC:
+  case TargetOpcode::G_ADDRSPACE_CAST:
+  case TargetOpcode::G_PTR_ADD:
+  case TargetOpcode::COPY:
+  case TargetOpcode::G_PTRTOINT:
+  case TargetOpcode::G_ANYEXT:
+  case TargetOpcode::G_SEXT:
+  case TargetOpcode::G_ZEXT:
+  case TargetOpcode::G_GLOBAL_VALUE:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static void processNewInstrs(MachineFunction &MF, SPIRVGlobalRegistry *GR,
                              MachineIRBuilder MIB) {
   MachineRegisterInfo &MRI = MF.getRegInfo();
-
+  SPIRVType *spvType;
+  Register Reg;
   for (MachineBasicBlock &MBB : MF) {
     for (MachineInstr &I : MBB) {
       const unsigned Opcode = I.getOpcode();
+      if ((Opcode == TargetOpcode::G_AND || Opcode == TargetOpcode::G_OR ||
+           Opcode == TargetOpcode::G_ADD || Opcode == TargetOpcode::G_SUB ||
+           Opcode == TargetOpcode::G_ICMP)) {
+        unsigned i = 1;
+        if (Opcode == TargetOpcode::G_ICMP) {
+          i = 2;
+        }
+        if (GR->getSPIRVTypeForVReg(I.getOperand(i).getReg()) !=
+            GR->getSPIRVTypeForVReg(I.getOperand(i + 1).getReg())) {
+          Register Op1 = I.getOperand(i).getReg();
+          Register Op2 = I.getOperand(i + 1).getReg();
+          SPIRVType *Op2Type = GR->getSPIRVTypeForVReg(Op2);
+          Register BitCastReg = MRI.createVirtualRegister(MRI.getRegClass(Op2));
+          MIB.buildInstr(SPIRV::OpBitcast)
+              .addDef(BitCastReg)
+              .addUse(GR->getSPIRVTypeID(Op2Type))
+              .addUse(Op1);
+          setRegClassType(BitCastReg, Op2Type, GR, &MRI, *GR->CurMF, true);
+          I.getOperand(i).setReg(BitCastReg);
+          bool FirstDefFound = false;
+          for (MachineInstr &MI : MRI.use_instructions(Op1)) {
+            for (MachineOperand &MO : MI.operands()) {
+              if (MO.isReg() && MO.getReg() == Op1) {
+                if (!FirstDefFound && MO.isDef())
+                  FirstDefFound = true;
+                else if (MI.getOpcode() != SPIRV::OpBitcast)
+                  MO.setReg(BitCastReg);
+              }
+            }
+          }
+        }
+      }
       if (Opcode == TargetOpcode::G_UNMERGE_VALUES) {
         unsigned ArgI = I.getNumOperands() - 1;
         Register SrcReg = I.getOperand(ArgI).isReg()
@@ -95,6 +151,61 @@ static void processNewInstrs(MachineFunction &MF, SPIRVGlobalRegistry *GR,
             setRegClassType(ResVReg, ResType, GR, &MRI, *GR->CurMF, true);
           }
         }
+      } else if (Opcode == TargetOpcode::G_ICMP ||
+                 Opcode == TargetOpcode::G_FCMP) {
+        Reg = I.getOperand(0).getReg();
+        if (GR->getSPIRVTypeForVReg(Reg) != nullptr)
+          continue;
+        MIB.setInsertPt(*I.getParent(), I);
+        LLT RhsType =
+            MRI.getType(I.getOperand(2).getReg()); // Type of RHS operand
+        Type *BoolTy = Type::getInt1Ty(MIB.getMF().getFunction().getContext());
+        if (RhsType.isVector()) {
+          unsigned NumElts = RhsType.getNumElements();
+          Type *VecBoolTy = VectorType::get(BoolTy, NumElts, false);
+          spvType = GR->getOrCreateSPIRVType(
+              VecBoolTy, MIB, SPIRV::AccessQualifier::ReadWrite, true);
+        } else {
+          spvType = GR->getOrCreateSPIRVType(
+              BoolTy, MIB, SPIRV::AccessQualifier::ReadWrite, true);
+        }
+        if (spvType) {
+          setRegClassType(Reg, spvType, GR, &MRI, *GR->CurMF, true);
+        }
+      } else if (Opcode == TargetOpcode::G_BUILD_VECTOR) {
+        Reg = I.getOperand(0).getReg();
+        if (MRI.getRegClassOrNull(Reg))
+          continue;
+
+        MIB.setInsertPt(*I.getParent(), I);
+        unsigned NumElts = I.getNumOperands() - 1;
+        Register FirstOpReg = I.getOperand(1).getReg();
+        SPIRVType *ScalarType = GR->getSPIRVTypeForVReg(FirstOpReg);
+        // Construct the vector type
+        spvType =
+            GR->getOrCreateSPIRVVectorType(ScalarType, NumElts, MIB, true);
+        GR->assignSPIRVTypeToVReg(spvType, Reg, MIB.getMF());
+        setRegClassType(Reg, spvType, GR, &MRI, *GR->CurMF, true);
+
+      } else if (Opcode == TargetOpcode::G_SELECT) {
+        Reg = I.getOperand(0).getReg();
+        if (GR->getSPIRVTypeForVReg(Reg) == nullptr) {
+          MIB.setInsertPt(*I.getParent(), I);
+          spvType = GR->getSPIRVTypeForVReg(I.getOperand(2).getReg());
+          if (spvType) {
+            setRegClassType(Reg, spvType, GR, &MRI, *GR->CurMF, true);
+          }
+        }
+      } else if (canPropagate(Opcode)) {
+        Reg = I.getOperand(0).getReg();
+        spvType = GR->getSPIRVTypeForVReg(Reg);
+        if (!spvType) {
+          MIB.setInsertPt(*I.getParent(), I);
+          spvType = propagateSPIRVType(&I, GR, MRI, MIB);
+          if (spvType) {
+            setRegClassType(Reg, spvType, GR, &MRI, *GR->CurMF, true);
+          }
+        }
       } else if (mayBeInserted(Opcode) && I.getNumDefs() == 1 &&
                  I.getNumOperands() > 1 && I.getOperand(1).isReg()) {
         // Legalizer may have added a new instructions and introduced new
@@ -105,6 +216,13 @@ static void processNewInstrs(MachineFunction &MF, SPIRVGlobalRegistry *GR,
         // or already processed
         // Check if we have type defined for operands of the new instruction
         bool IsKnownReg = MRI.getRegClassOrNull(ResVReg);
+        if (IsKnownReg && !GR->getSPIRVTypeForVReg(ResVReg)) {
+          if (I.getOperand(1).isReg()) {
+            SPIRVType *ResTy =
+                GR->getSPIRVTypeForVReg(I.getOperand(1).getReg());
+            GR->assignSPIRVTypeToVReg(ResTy, ResVReg, *GR->CurMF);
+          }
+        }
         SPIRVType *ResVType = GR->getSPIRVTypeForVReg(
             IsKnownReg ? ResVReg : I.getOperand(1).getReg());
         if (!ResVType)

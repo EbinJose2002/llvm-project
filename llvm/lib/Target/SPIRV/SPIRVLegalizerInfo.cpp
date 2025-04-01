@@ -264,10 +264,11 @@ SPIRVLegalizerInfo::SPIRVLegalizerInfo(const SPIRVSubtarget &ST) {
   // TODO: add proper legalization rules.
   getActionDefinitionsBuilder(G_ATOMIC_CMPXCHG).alwaysLegal();
 
-  getActionDefinitionsBuilder(
-      {G_UADDO, G_SADDO, G_USUBO, G_SSUBO, G_UMULO, G_SMULO})
+  getActionDefinitionsBuilder({G_UADDO, G_USUBO, G_UMULO, G_SMULO})
       .alwaysLegal();
-
+  getActionDefinitionsBuilder(G_LROUND).lower();
+  getActionDefinitionsBuilder(G_IS_FPCLASS).lower();
+  getActionDefinitionsBuilder({G_SADDO, G_SSUBO}).lower();
   // FP conversions.
   getActionDefinitionsBuilder({G_FPTRUNC, G_FPEXT})
       .legalForCartesianProduct(allFloatScalarsAndVectors);
@@ -354,7 +355,6 @@ bool SPIRVLegalizerInfo::legalizeCustom(
   auto Opc = MI.getOpcode();
   MachineRegisterInfo &MRI = MI.getMF()->getRegInfo();
   if (Opc == TargetOpcode::G_ICMP) {
-    assert(GR->getSPIRVTypeForVReg(MI.getOperand(0).getReg()));
     auto &Op0 = MI.getOperand(2);
     auto &Op1 = MI.getOperand(3);
     Register Reg0 = Op0.getReg();
