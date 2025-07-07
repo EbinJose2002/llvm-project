@@ -1923,6 +1923,11 @@ static void genDeclareSymbol(Fortran::lower::AbstractConverter &converter,
     mlir::Value dummyScope;
     if (converter.isRegisteredDummySymbol(sym))
       dummyScope = converter.dummyArgsScopeValue();
+    mlir::Type eleTy = base.getType();
+    if (auto refTy = mlir::dyn_cast<fir::ReferenceType>(eleTy))
+      eleTy = refTy.getEleTy();
+    if (fir::isa_box_type(eleTy))
+      shapeOrShift = nullptr;
     auto newBase = builder.create<hlfir::DeclareOp>(
         loc, base, name, shapeOrShift, lenParams, dummyScope, attributes,
         dataAttr);
