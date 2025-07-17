@@ -1,0 +1,72 @@
+	OpCapability Kernel
+	OpCapability Addresses
+	OpCapability Float64
+	OpCapability Linkage
+	OpExtension "SPV_KHR_non_semantic_info"
+	%1 = OpExtInstImport "OpenCL.std"
+	%28 = OpExtInstImport "NonSemantic.Shader.DebugInfo.100"
+	OpMemoryModel Physical64 OpenCL
+	OpEntryPoint Kernel %39 "k"
+	OpExecutionMode %39 ContractionOff
+	%26 = OpString "/home/user/Ebin/llvm-project/llvm/test/CodeGen/SPIRV/debug-info/<stdin>"
+	%29 = OpString "/home/user/Ebin/llvm-project/llvm/test/CodeGen/SPIRV/debug-info/DebugFunction.cl"
+	%33 = OpString "foo"
+	%34 = OpString ""
+	%36 = OpString "k"
+	%37 = OpString ""
+	OpSource OpenCL_C 200000
+	OpName %19 "i"
+	OpName %20 "_Z3fooi"
+	OpName %21 "i.addr"
+	OpName %23 "conv"
+	OpName %24 "mul"
+	OpName %25 "conv1"
+	OpName %2 "entry"
+	OpName %39 "k"
+	OpName %40 "a"
+	OpName %41 "call"
+	OpName %3 "entry"
+	OpDecorate %21 Alignment 4
+	OpDecorate %20 LinkageAttributes "_Z3fooi" Export
+	OpDecorate %40 Alignment 4
+	%4 = OpTypeInt 32 0
+	%5 = OpTypeFloat 32
+	%6 = OpTypeFunction %5 %4
+	%7 = OpTypeFloat 64
+	%8 = OpTypePointer Function %4
+	%9 = OpConstant %7 3.1400000000000001
+	%10 = OpTypeVoid
+	%11 = OpConstant %4 0
+	%12 = OpConstant %4 3
+	%13 = OpConstant %4 18
+	%14 = OpConstant %4 256
+	%15 = OpConstant %4 21
+	%16 = OpTypeFunction %10
+	%17 = OpTypePointer Function %5
+	%18 = OpConstant %4 2
+	%27 = OpExtInst %10 %28 DebugSource %26
+	%30 = OpExtInst %10 %28 DebugSource %29
+	%31 = OpExtInst %10 %28 DebugCompilationUnit %12 %11 %27 %11
+	%32 = OpExtInst %10 %28 DebugTypeFunction %11 %10
+	%35 = OpExtInst %10 %28 DebugFunction %33 %32 %30 %13 %11 %31 %34 %14 %13
+	%38 = OpExtInst %10 %28 DebugFunction %36 %32 %30 %15 %11 %31 %37 %14 %15
+	%20 = OpFunction %5 DontInline %6       ; -- Begin function _Z3fooi
+	%19 = OpFunctionParameter %4
+	%2 = OpLabel
+	%21 = OpVariable %8 Function 
+	OpStore %21 %19 Aligned 4
+	%22 = OpLoad %4 %21 Aligned 4
+	%23 = OpConvertSToF %7 %22
+	%24 = OpFMul %7 %23 %9
+	%25 = OpFConvert %5 %24
+	OpReturnValue %25
+	OpFunctionEnd
+                                        ; -- End function
+	%39 = OpFunction %10 DontInline %16     ; -- Begin function k
+	%3 = OpLabel
+	%40 = OpVariable %17 Function 
+	%41 = OpFunctionCall %5 %20 %18
+	OpStore %40 %41 Aligned 4
+	OpReturn
+	OpFunctionEnd
+                                        ; -- End function
