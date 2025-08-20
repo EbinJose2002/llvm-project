@@ -272,8 +272,7 @@ SPIRVLegalizerInfo::SPIRVLegalizerInfo(const SPIRVSubtarget &ST) {
   // TODO: add proper legalization rules.
   getActionDefinitionsBuilder(G_ATOMIC_CMPXCHG).alwaysLegal();
 
-  getActionDefinitionsBuilder(
-      {G_UADDO, G_SADDO, G_USUBO, G_SSUBO, G_UMULO, G_SMULO})
+  getActionDefinitionsBuilder({G_UADDO, G_USUBO, G_UMULO, G_SMULO})
       .alwaysLegal();
 
   // FP conversions.
@@ -340,6 +339,7 @@ SPIRVLegalizerInfo::SPIRVLegalizerInfo(const SPIRVSubtarget &ST) {
   }
 
   getActionDefinitionsBuilder(G_IS_FPCLASS).custom();
+  getActionDefinitionsBuilder({G_SADDO, G_SSUBO}).custom();
 
   getLegacyLegalizerInfo().computeTables();
   verify(*ST.getInstrInfo());
@@ -368,6 +368,9 @@ bool SPIRVLegalizerInfo::legalizeCustom(
     return true;
   case TargetOpcode::G_IS_FPCLASS:
     return legalizeIsFPClass(Helper, MI, LocObserver);
+  case TargetOpcode::G_SADDO:
+  case TargetOpcode::G_SSUBO:
+    return legalizeSADDO_SSUBO(Helper, MI, LocObserver);
   case TargetOpcode::G_ICMP: {
     assert(GR->getSPIRVTypeForVReg(MI.getOperand(0).getReg()));
     auto &Op0 = MI.getOperand(2);
@@ -622,5 +625,72 @@ bool SPIRVLegalizerInfo::legalizeIsFPClass(
 
   MIRBuilder.buildCopy(DstReg, Res);
   MI.eraseFromParent();
+  return true;
+}
+
+bool SPIRVLegalizerInfo::legalizeSADDO_SSUBO(
+    LegalizerHelper &Helper, MachineInstr &MI,
+    LostDebugLocObserver &LocObserver) const {
+  auto &MIRBuilder = Helper.MIRBuilder;
+  auto &MF = MIRBuilder.getMF();
+  MachineRegisterInfo &MRI = MF.getRegInfo();
+  const SPIRVSubtarget &ST = MF.getSubtarget<SPIRVSubtarget>();
+  const SPIRVInstrInfo *TII = ST.getInstrInfo();
+
+  auto [Dst0, Dst0Ty, Dst1, Dst1Ty, LHS, LHSTy, RHS, RHSTy] =
+      MI.getFirst4RegLLTs();
+  const bool IsAdd = MI.getOpcode() == TargetOpcode::G_SADDO;
+  LLT Ty = Dst0Ty;
+  LLT BoolTy = Dst1Ty;
+  const SPIRVType *SPVResTy;
+  const SPIRVType *SPVBoolTy;
+  Register Zero;
+  LLT ElemTy = Ty.isVector() ? Ty.getElementType() : Ty;
+  auto SPVElemTy =
+      GR->getOrCreateSPIRVIntegerType(ElemTy.getSizeInBits(), MIRBuilder);
+  Register ElemZero = MIRBuilder.buildConstant(ElemTy, 0).getReg(0);
+  GR->assignSPIRVTypeToVReg(SPVElemTy, ElemZero, MF);
+  if (Ty.isVector()) {
+    unsigned NumElems = Ty.getNumElements();
+    SPVResTy =
+        GR->getOrCreateSPIRVVectorType(SPVElemTy, NumElems, MIRBuilder, true);
+    auto SPVBoolElemTy = GR->getOrCreateSPIRVBoolType(MI, *TII);
+    SPVBoolTy = GR->getOrCreateSPIRVVectorType(SPVBoolElemTy, NumElems,
+                                               MIRBuilder, true);
+    SmallVector<Register, 4> ZeroOps(NumElems, ElemZero);
+    Zero = MIRBuilder.buildBuildVector(Ty, ZeroOps).getReg(0);
+  } else {
+    SPVResTy = SPVElemTy;
+    Zero = ElemZero;
+    SPVBoolTy = GR->getOrCreateSPIRVBoolType(MI, *TII);
+  }
+  GR->assignSPIRVTypeToVReg(SPVResTy, Zero, MF);
+  Register NewDst0 = MRI.cloneVirtualRegister(Dst0);
+  MRI.setRegClass(NewDst0, &SPIRV::IDRegClass);
+  GR->assignSPIRVTypeToVReg(SPVResTy, NewDst0, MF);
+  if (IsAdd)
+    MIRBuilder.buildAdd(NewDst0, LHS, RHS);
+  else
+    MIRBuilder.buildSub(NewDst0, LHS, RHS);
+
+  // For an addition, the result should be less than one of the operands (LHS)
+  // if and only if the other operand (RHS) is negative, otherwise there will
+  // be overflow.
+  // For a subtraction, the result should be less than one of the operands
+  // (LHS) if and only if the other operand (RHS) is (non-zero) positive,
+  // otherwise there will be overflow.
+  auto ResultLowerThanLHS =
+      MIRBuilder.buildICmp(CmpInst::ICMP_SLT, BoolTy, NewDst0, LHS);
+  MRI.setRegClass(ResultLowerThanLHS.getReg(0), &SPIRV::IDRegClass);
+  GR->assignSPIRVTypeToVReg(SPVBoolTy, ResultLowerThanLHS.getReg(0), MF);
+  auto ConditionRHS = MIRBuilder.buildICmp(
+      IsAdd ? CmpInst::ICMP_SLT : CmpInst::ICMP_SGT, BoolTy, RHS, Zero);
+  MRI.setRegClass(ConditionRHS.getReg(0), &SPIRV::IDRegClass);
+  GR->assignSPIRVTypeToVReg(SPVBoolTy, ConditionRHS.getReg(0), MF);
+
+  MIRBuilder.buildXor(Dst1, ConditionRHS, ResultLowerThanLHS);
+  MIRBuilder.buildCopy(Dst0, NewDst0);
+  MI.eraseFromParent();
+
   return true;
 }

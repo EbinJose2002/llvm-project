@@ -34,6 +34,8 @@ public:
 private:
   bool legalizeIsFPClass(LegalizerHelper &Helper, MachineInstr &MI,
                          LostDebugLocObserver &LocObserver) const;
+  bool legalizeSADDO_SSUBO(LegalizerHelper &Helper, MachineInstr &MI,
+                           LostDebugLocObserver &LocObserver) const;
 };
 } // namespace llvm
 #endif // LLVM_LIB_TARGET_SPIRV_SPIRVMACHINELEGALIZER_H
